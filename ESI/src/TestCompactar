@@ -1,0 +1,10 @@
+GET fire:emblem
+SET fire:emblem LucinayMarthSeParecen
+GET final:fantasy
+SET final:fantasy CloudyTifa
+SET fire:emblem LucinaEsMejor
+GET final:fight
+SET final:fight PoisonEsHombre
+STORE fire:emblem
+STORE final:fantasy
+STORE final:fight

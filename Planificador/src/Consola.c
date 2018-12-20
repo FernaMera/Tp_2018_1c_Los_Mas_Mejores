@@ -1,0 +1,689 @@
+#include "Planificador.h"
+#include "Consola.h"
+
+void Console(/*void *parameter*/)
+{
+	int exit = 0; //flag de hilo consola
+    int consoleInputIndex = 0;
+	char * line;
+	char * command;
+	char * key;
+	char * id;
+	bool paused = false;
+
+	printf("Type 'help' for a list of commands\n");
+	while(exit == 0)
+	{
+		line = readline("Command: ");
+		add_history(line);
+
+		consoleInputIndex = 0;
+
+		command = consoleReadArg(line, &consoleInputIndex);
+
+		switch(to_enum(command))
+		{
+			case EXIT:
+			{
+				stop = 1;
+				exit = 1;
+				sem_post(&hay_esis);
+				pthread_mutex_unlock(&pause_mutex);
+				log_warning(logger, "The Scheduler was closed by command");
+				break;
+			}
+			case PAUSE:
+			{
+				//chequea que no este en pausa
+				if(paused)
+				{
+					printf("Already in pause\n");
+					break;
+				}
+				//el panificador se pone en pausa
+				pthread_mutex_lock(&pause_mutex);
+				paused = true;
+				log_info(logger, "The Scheduler was paused by command");
+				break;
+			}
+			case RESUME:
+			{
+				//chequea que este en pausa
+				if(!paused)
+				{
+					printf("The system is not on pause\n");
+					break;
+				}
+				//el panificador vuelve de la pausa
+				pthread_mutex_unlock(&pause_mutex);
+				paused = false;
+				log_info(logger, "The Scheduler was unpaused by command");
+				break;
+			}
+			case BLOCK:
+			{
+				//bloquear ESI
+				key = consoleReadArg(line, &consoleInputIndex);
+				if(null_argument(key, "<key>"))
+					break;
+
+				id = consoleReadArg(line, &consoleInputIndex);
+				if(null_argument(id, "<id>"))
+					break;
+
+				sem_wait(&esi_executing);
+				block_key_by_console(key, id);
+				sem_post(&esi_executing);
+
+				log_info(logger, "The Scheduler blocked key: %s with id: %s by command", key, id);
+				free(key);
+				free(id);
+				break;
+			}
+			case UNLOCK:
+			{
+				//desbloquear clave
+				key = consoleReadArg(line, &consoleInputIndex);
+				if(null_argument(key, "<key>"))
+					break;
+				log_info(logger, "The Scheduler unlocked the key: %s by command", key);
+				
+				sem_wait(&esi_executing);
+				unlock_key_by_console(key);
+				sem_post(&esi_executing);
+				free(key);
+				break;
+			}
+			case LIST:
+			{
+				//mostrar los esi bloqueados por el recurso
+				key = consoleReadArg(line, &consoleInputIndex);
+				if(null_argument(key, "<key>"))
+					break;
+
+				sem_wait(&esi_executing);
+				list_blocked_esis(key);
+				sem_post(&esi_executing);
+				free(key);
+				break;
+			}
+			case KILL:
+			{
+				//finaliza el esi
+				id = consoleReadArg(line, &consoleInputIndex);
+				if(null_argument(id, "<id>"))
+					break;
+
+				sem_wait(&esi_executing);
+				kill(id);
+				sem_post(&esi_executing);
+
+				free(id);
+				break;
+			}
+			case STATUS:
+			{
+				//ver enunciado
+				key = consoleReadArg(line, &consoleInputIndex);
+				if(null_argument(key, "<key>"))
+					break;
+				log_info(logger, "Status information displayed by command");
+
+				sem_wait(&esi_executing);
+				get_key_status(key);
+				sem_post(&esi_executing);
+
+				free(key);
+				break;
+			}
+			case DEADLOCK:
+			{
+				//deadlock
+				log_info(logger, "Deadlock by command");
+
+				sem_wait(&esi_executing);
+				deadlock();
+				sem_post(&esi_executing);
+				break;
+			}
+			case HELP:
+			{
+				//lista de todos los commandos
+				printf("exit\npause\nresume\nblock <id> <key>\nunlock <key>\n"
+				"list <resource>\nkill <id>\nstatus <key>\ndeadlock\n");
+				break;
+			}
+			case ERROR:
+			{
+				printf("Invalid Command\n");
+				break;
+			}
+		}
+		
+		free(line);
+		free(command);
+	}
+	
+}
+
+char * consoleReadArg(char * source, int * i)
+{
+	char * result = (char *)malloc((strlen(source) + 1) * sizeof(char));
+	int j = 0;
+
+	while(source[*i] == ' ')
+	{
+		*i = *i + 1;
+	}
+
+	while(source[*i] != ' ' && source[*i] != '\0')
+	{
+		result[j] = source[*i];
+		*i = *i + 1;
+		j++;
+	}
+
+	result[j] = '\0';
+
+	return result;
+}
+
+_Commands to_enum(char * source)
+{
+	if (string_equals_ignore_case(source, "EXIT"))
+		return EXIT;
+	if (string_equals_ignore_case(source, "PAUSE"))
+		return PAUSE;
+	if (string_equals_ignore_case(source, "RESUME"))
+		return RESUME;
+	if (string_equals_ignore_case(source, "BLOCK"))
+		return BLOCK;
+	if (string_equals_ignore_case(source, "UNLOCK"))
+		return UNLOCK;
+	if (string_equals_ignore_case(source, "LIST"))
+		return LIST;	
+	if (string_equals_ignore_case(source, "KILL"))
+		return KILL;
+	if (string_equals_ignore_case(source, "STATUS"))
+		return STATUS;
+	if (string_equals_ignore_case(source, "DEADLOCK"))
+		return DEADLOCK;
+	if (string_equals_ignore_case(source, "HELP"))
+		return HELP;					
+	return ERROR;
+}
+
+int null_argument(char* arg_console, char* for_logger)
+{
+	if(strcmp(arg_console,"") == 0)
+	{
+		log_warning(logger, "Missing argument: %s", for_logger);
+		return 1;
+	}
+	return 0;
+}
+
+void block_key_by_console(char * key, char * id)
+{
+	bool new_key = false;
+
+	//ver si esta ejecutando o en listo
+	t_esi * otro_esi = find_and_remove_by_id(lista_ready, id);
+	
+    clave_bloqueada_t* un_key = find_by_key(lista_bloqueados, key);
+    int key_len = strlen(key);
+    int id_len = strlen(un_esi->name);
+
+	if(un_key == NULL) //si no encuentra la clave en la lista, la crea
+	{
+		log_info(logger, "Requested Key doesnt exist, Adding Key to list");
+        un_key = malloc(sizeof(clave_bloqueada_t));
+        un_key->key = malloc(key_len * sizeof(char) + 1);
+        strcpy(un_key->key, key);
+        un_key->cola_esis_bloqueados = queue_create();
+
+        //list_add(lista_bloqueados, un_key);
+		new_key = true;
+	}
+
+	if(otro_esi != NULL) //esta en cola listo
+	{	
+		//otro_esi->console_blocked = 1;
+		queue_push(un_key->cola_esis_bloqueados, otro_esi);
+	}	
+	else	//esta en ejecucion
+	{
+		if(string_equals_ignore_case(un_esi->name, id))
+		{
+			queue_push(un_key->cola_esis_bloqueados, un_esi);
+		}
+		else
+		{
+			printf("Cannot find ESI");
+
+			if(new_key)
+			{
+				queue_destroy(un_key->cola_esis_bloqueados);
+				free(un_key->key);
+				free(un_key);
+			}
+			return;
+		}
+	}
+
+	clave_bloqueada_por_esi_t* nueva_clave = malloc(sizeof(clave_bloqueada_por_esi_t));
+    nueva_clave->esi_id = malloc(id_len * sizeof(char) + 1);
+    strcpy(nueva_clave->esi_id, id);
+    nueva_clave->key = malloc(key_len * sizeof(char) + 1);
+    strcpy(nueva_clave->key, key);
+        
+	list_add(claves_bloqueadas_por_esis, nueva_clave); //Reservo la clave como bloqueada para que la use el esi que esta ejecutando (tecnicamente no esta bloqueada aun, eso lo hace el coordinador)
+    log_info(logger, "New key blocked: %s by %s ",nueva_clave->key, nueva_clave->esi_id);
+    log_all_blocked_keys(logger, claves_bloqueadas_por_esis);
+
+	list_add(lista_bloqueados, un_key);
+	sem_wait(&hay_esis);
+}
+
+void unlock_key_by_console(char* key)
+{
+	void _log_all_ready_b(void* q)
+	{
+		t_esi* p = (t_esi*) q;
+		log_info(logger, "In Ready queue before unlocking: %s", p->name);
+	}
+	list_iterate(lista_ready, _log_all_ready_b);
+
+	clave_bloqueada_t* a_key = (clave_bloqueada_t*)malloc(sizeof(clave_bloqueada_t));
+	a_key = find_by_key(lista_bloqueados, key);
+
+	if(a_key == NULL)
+	{
+		printf("Requested Key doesnt exist\n");
+		return;
+	}
+
+	bool _is_the_key(void* q)
+	{
+		clave_bloqueada_por_esi_t * p = (clave_bloqueada_por_esi_t *) q;
+		log_info(logger, "key blocked: %s key to unlock: %s", p->key, key);
+		return string_equals_ignore_case(p->key, key);
+	}
+
+	clave_bloqueada_por_esi_t * blocked_key = list_remove_by_condition(claves_bloqueadas_por_esis, _is_the_key);
+    if(blocked_key != NULL)
+    {
+    	free(blocked_key->esi_id);
+    	free(blocked_key->key);
+    	free(blocked_key);
+    }
+
+	if(queue_is_empty(a_key->cola_esis_bloqueados))
+	{
+		return;
+	}
+
+	t_esi* otro_esi = queue_pop(a_key->cola_esis_bloqueados);
+	if(string_equals_ignore_case(otro_esi->name, "CONSOLA"))
+	{
+		if(queue_is_empty(a_key->cola_esis_bloqueados))
+		{
+			return;
+		}
+
+		otro_esi = queue_pop(a_key->cola_esis_bloqueados);
+	}
+
+	switch(algorithm)
+    {
+        case SJFSD:
+        {
+            //estimar la rafaga del esi que se libera
+            calculate_estimation(otro_esi);
+
+            log_info(logger, "New Estimation for: %s is: %f",
+                otro_esi->name, otro_esi->cpu_time_estimated);
+
+            list_add(lista_ready, otro_esi);
+            
+            //reordenar la lista de ready
+            
+            break;
+        }
+        case SJFCD:         
+        {
+            calculate_estimation(otro_esi);		//revisar estimaciones de un_esi y el que se libera
+
+            log_info(logger, "Estimation for: %s is: %f",
+                otro_esi->name, otro_esi->cpu_time_estimated);
+
+
+            if (otro_esi->cpu_time_estimated < un_esi->cpu_time_estimated)
+            {
+            	list_add(lista_ready, un_esi);
+                un_esi = otro_esi; //un_esi siempre es el ESI que se está ejecutando
+            }
+            else
+            {
+            	list_add(lista_ready, otro_esi);
+            }          
+
+            break;
+        }
+        case HRRN:
+        {
+            //no hay desalojo pero el esi desbloqueado tiene espera de 0;
+            calculate_estimation(otro_esi);
+            log_info(logger, "Estimation for: %s is: %f",
+                otro_esi->name, otro_esi->cpu_time_estimated);
+
+            otro_esi->waiting_time = (float)0;
+            list_add(lista_ready, otro_esi);
+            
+            break;
+        }
+    }
+    //sort_list_by_algorithm(lista_ready);		//Independientemente de los casos, reordeno lista_ready
+    
+	otro_esi->instructions_counter = 0;
+
+	void _log_all_ready_a(void* q)
+	{
+		t_esi* p = (t_esi*) q;
+		log_info(logger, "In Ready queue after unlocking: %s", p->name);
+	}
+	list_iterate(lista_ready, _log_all_ready_a);
+	sem_post(&hay_esis);
+}
+
+void list_blocked_esis(char* resource)
+{
+	clave_bloqueada_t* a_key = (clave_bloqueada_t*)malloc(sizeof(clave_bloqueada_t));
+	a_key = find_by_key(lista_bloqueados, resource);
+
+	if(a_key == NULL)
+	{
+		printf("Requested Key doesnt exist\n");
+		return;
+	}
+	
+	if(queue_is_empty(a_key->cola_esis_bloqueados))
+	{
+		printf("No ESIs are blocked\n");
+		return;
+	}
+	
+	printf("ESIS Blocked waiting for: %s\n", resource);
+	int cant = queue_size(a_key->cola_esis_bloqueados);
+	for(int i = 1; i <= cant; i++)
+	{
+		t_esi* otro_esi = queue_pop(a_key->cola_esis_bloqueados);
+		printf("%s\n", otro_esi->name);
+		queue_push(a_key->cola_esis_bloqueados, otro_esi);
+	}
+}
+
+void get_key_status(char* key)
+{
+	clave_bloqueada_t* a_key = (clave_bloqueada_t*)malloc(sizeof(clave_bloqueada_t));
+	a_key = find_by_key(lista_bloqueados, key);
+
+	content_header* header = malloc(sizeof(content_header));
+	
+	if(a_key == NULL)//la clave nunca se pidio, entonces hay que simular
+	{	
+		printf("Requested Key doesnt exist\n");
+
+		//simular asignacion de instancia
+		//send_header(socket_c, 33);
+		header->id = 33;
+		header->len = strlen(key);
+		header->len2 = 0;
+
+		send(socket_c, header, sizeof(content_header), 0);
+
+		send(socket_c, key, strlen(key), 0);
+
+		recv(socket_c, header, sizeof(content_header), 0);
+		if(header->id == 36)//instancia simulada
+		{
+			char * instance_name = malloc(header->len + 1);
+			recv(socket_c, instance_name, header->len, 0);
+			instance_name[header->len] = '\0';
+
+			printf("Key should get assigned to: %s\n", instance_name);
+
+			free(instance_name);
+			free(header);
+		}
+		return;
+	}
+	else//la clave fue pedida, recibir valor o instancia en la que está
+	{
+		//send_header(socket_c, 33);
+
+		content_header* header = malloc(sizeof(content_header));
+		header->id = 33;
+		header->len = strlen(key);
+		header->len2 = 0;
+
+		send(socket_c, header, sizeof(content_header), 0);
+
+		send(socket_c, key, strlen(key), 0);
+
+		recv(socket_c, header, sizeof(content_header), 0);
+
+		if(header->id == 37) //tiene valor asignado
+		{
+			char * value = malloc(header->len2 + 1);
+			char * instance_name = malloc(header->len + 1);
+			char * message_recv = malloc(header->len + header->len2 + 1);
+
+			recv(socket_c, message_recv, header->len + header->len2, 0);
+
+			memcpy(instance_name, message_recv, header->len);
+			memcpy(value, message_recv + header->len, header->len2);
+			instance_name[header->len] = '\0';
+			value[header->len2] = '\0';
+
+			printf("Instance: %s Value: %s\n",instance_name, value);
+
+			free(instance_name);
+			free(value);
+			free(message_recv);
+		}
+		if(header->id == 38) //no tiene valor o fue reemplazada
+		{
+			char * instance_name = malloc(header->len + 1);
+			recv(socket_c, instance_name, header->len, 0);
+			instance_name[header->len] = '\0';
+
+			printf("Instance: %s Does not have a value\n", instance_name);
+
+			free(instance_name);
+		}
+
+		free(header);
+
+		return;			
+	}
+}
+
+void kill(char* esi_id)
+{
+	bool found_victim = false;
+
+	//buscar en lista ready
+	t_esi* victim = find_by_id(lista_ready, esi_id);
+	if(victim != NULL)
+	{
+		//kill da motherfuck#r
+		send_header(victim->socket, 99);
+
+		release_keys_and_unlock_esis(victim);
+
+		//agregar a cola finalizados
+    	queue_push(finished_esis, victim);
+
+		log_info(logger, "Killed: %s", victim->name);
+		printf("%s killed succesfully\n", victim->name);
+
+		return;
+	}
+
+	//buscar en colas de bloqueado
+	void _where_is_she(void* p)//con la voz de batman
+	{
+		clave_bloqueada_t* one_key = (clave_bloqueada_t*) p;
+
+		int size = queue_size(one_key->cola_esis_bloqueados);
+		
+		for(int i = 0; i < size; i++)
+		{
+			victim = queue_pop(one_key->cola_esis_bloqueados);
+
+			if(string_equals_ignore_case(victim->name, esi_id))
+			{
+				//kill da motherfuck#r
+				send_header(victim->socket, 99);
+
+				release_keys_and_unlock_esis(victim);
+
+				//agregar a cola finalizados
+				queue_push(finished_esis, victim);
+
+				log_info(logger, "Killed: %s", victim->name);
+				printf("%s killed succesfully\n", victim->name);
+
+				found_victim = true;
+			}
+			else
+			{
+				queue_push(one_key->cola_esis_bloqueados, victim);
+			}
+		}
+	}
+	list_iterate(lista_bloqueados, _where_is_she);
+
+	if(!found_victim)
+		printf("Cannot find ESI\n");
+}
+
+void deadlock()
+{
+	t_list* lista_deadlock = list_create();
+	void _esta_en_deadlock(void* p)
+	{
+		clave_bloqueada_t* one_key = (clave_bloqueada_t*) p;
+		
+		for(int i = 0; i < queue_size(one_key->cola_esis_bloqueados); i++)
+		{
+			t_esi* one_esi = queue_pop(one_key->cola_esis_bloqueados);
+			t_list* lista_claves = list_create();
+			log_info(logger, "Checking deadlock for %s", one_esi->name);
+
+			bool _keys_owned(void* p)
+			{
+				clave_bloqueada_por_esi_t* q = (clave_bloqueada_por_esi_t*) p;
+				return (string_equals_ignore_case(q->esi_id, one_esi->name));
+			}
+			lista_claves = list_filter(claves_bloqueadas_por_esis, _keys_owned);
+
+			void _another_esi_waiting(void *p)
+			{
+				clave_bloqueada_por_esi_t* q = (clave_bloqueada_por_esi_t*) p;
+				clave_bloqueada_t* another_key = find_by_key(lista_bloqueados, q->key);
+
+				for(int j = 0; j < queue_size(another_key->cola_esis_bloqueados); j++)
+				{
+					t_esi* another_esi = queue_pop(another_key->cola_esis_bloqueados);
+					log_info(logger, "is it blocked with %s?", another_esi->name);
+
+					void _has_key(void* p)
+					{
+						clave_bloqueada_por_esi_t* s = (clave_bloqueada_por_esi_t*) p;
+						bool a = string_equals_ignore_case(s->esi_id, another_esi->name);
+						bool b = string_equals_ignore_case(s->key, one_key->key);
+						if(a && b)
+						{
+							log_info(logger, "Found Deadlock");
+
+							bool _already_in_list_a(void* p)
+							{
+								return string_equals_ignore_case((char*)p, one_esi->name);
+							}
+							bool is_in_list = list_any_satisfy(lista_deadlock, _already_in_list_a);
+							if(!is_in_list)
+								list_add(lista_deadlock, one_esi->name);
+
+							bool _already_in_list_b(void* p)
+							{
+								return string_equals_ignore_case((char*)p, one_esi->name);
+							}
+							is_in_list = list_any_satisfy(lista_deadlock, _already_in_list_b);
+							if(!is_in_list)
+								list_add(lista_deadlock, another_esi->name);
+						}
+					}
+					list_iterate(claves_bloqueadas_por_esis, _has_key);
+
+					queue_push(another_key->cola_esis_bloqueados, another_esi);
+				}
+			}
+			list_iterate(lista_claves, _another_esi_waiting);
+			list_destroy(lista_claves);
+			queue_push(one_key->cola_esis_bloqueados, one_esi);
+		}
+	}
+	
+	list_iterate(lista_bloqueados, _esta_en_deadlock);
+
+	if(list_is_empty(lista_deadlock))
+	{
+		printf("No ESIS on deadlock\n");
+	}
+	else
+	{
+		printf("ESIS in Deadlock: \n");
+		void _print_esis(void* p)
+		{
+			printf("%s\n", (char*)p);
+		}
+		list_iterate(lista_deadlock, _print_esis);
+	}
+
+	list_destroy(lista_deadlock);
+}
+
+t_esi * find_by_id(t_list * lista, char* id)
+{
+	bool _is_this_one(void* q)
+	{
+		t_esi* p = (t_esi*) q;
+		return string_equals_ignore_case(p->name, id);
+	}
+
+	return list_find(lista, _is_this_one);
+}
+
+t_esi * find_and_remove_by_id(t_list * lista, char* id)
+{
+	bool _is_this_one(void* q)
+	{
+		t_esi* p = (t_esi*) q;
+		return string_equals_ignore_case(p->name, id);
+	}
+
+	return list_remove_by_condition(lista, _is_this_one);
+}
+
+clave_bloqueada_t * find_by_key(t_list * lista, char* key)
+{
+	bool _is_this_the_one(void* q)
+	{
+		clave_bloqueada_t* p = (clave_bloqueada_t*) q;
+		return string_equals_ignore_case(p->key, key);
+	}
+
+	return list_find(lista, _is_this_the_one);
+}
